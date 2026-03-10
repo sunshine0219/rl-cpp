@@ -1,17 +1,26 @@
-import argparse
+import argparse #接收命令行参数
 import importlib
 import json
 import os
 from argparse import BooleanOptionalAction
 from datetime import datetime
-from stable_baselines3.common.monitor import Monitor
+from stable_baselines3.common.monitor import Monitor #Stable-Baselines3 的环境包装器
 
-from rlm.architectures import StackedMapFeaturesExtractor
-from rlm.mower_env import MowerEnv
+from rlm.architectures import StackedMapFeaturesExtractor # 自定义特征提取器
+from rlm.mower_env import MowerEnv # 自定义环境类
 
 
 def main():
     parser = argparse.ArgumentParser()
+    ## agent 参数组
+    '''
+    algo：用 SAC 还是 PPO
+    learning_rate：学习率
+    cnn：是否用 CNN 特征提取器
+    cnn_dims：隐藏层维度
+    grouped_convs：是否使用 grouped convolution,这对应论文里的 SGCNN
+    buffer_size：经验回放池大小（SAC 用）
+    '''
     agent_args = parser.add_argument_group('agent')
     agent_args.add_argument('--algo', default='SAC', type=str)
     agent_args.add_argument('--learning_rate', default=2e-5, type=float)
@@ -21,10 +30,18 @@ def main():
     agent_args.add_argument('--buffer_size', default=500_000, type=int)
     agent_args.add_argument('--train_freq', default=1, type=int)
     agent_args.add_argument('--gradient_steps', default=1, type=int)
+    ## train 参数组
+    '''
+    checkpoint：从已有模型继续训练
+    steps：总训练步数
+    logdir：日志和模型保存目录
+    '''
     train_args = parser.add_argument_group('train')
     train_args.add_argument('--checkpoint', default=None, type=str)
     train_args.add_argument('--steps', default=1_000_000, type=int)
     train_args.add_argument('--logdir', default=None, type=str)
+    ## env 参数组
+    # 多尺度地图设置
     env_args = parser.add_argument_group('env')
     env_args.add_argument('--input_size', default=32, type=int)
     env_args.add_argument('--num_maps', default=4, type=int)
@@ -48,6 +65,7 @@ def main():
     env_args.add_argument('--position_noise', default=0.01, type=float)
     env_args.add_argument('--heading_noise', default=0.05, type=float)
     env_args.add_argument('--lidar_noise', default=0.05, type=float)
+    # 任务设置
     env_args.add_argument('--exploration', default=False, action=BooleanOptionalAction)
     env_args.add_argument('--overlap_observation', default=True, action=BooleanOptionalAction)
     env_args.add_argument('--frontier_observation', default=True, action=BooleanOptionalAction)
@@ -69,6 +87,14 @@ def main():
     env_args.add_argument('--use_goal_time_in_levels', default=False, action=BooleanOptionalAction)
     env_args.add_argument('--goal_coverage', default=0.9, type=float)
     env_args.add_argument('--goal_coverage_reward', default=0, type=float)
+    # reward 相关
+    '''
+    newly_visited_reward_scale：新覆盖区域奖励
+    local_tv_reward_scale：局部 TV 奖励
+    global_tv_reward_scale：全局 TV 奖励
+    constant_reward：每步固定惩罚
+    collision_reward：碰撞惩罚
+    '''
     env_args.add_argument('--wall_collision_reward', default=-10, type=float)
     env_args.add_argument('--obstacle_collision_reward', default=-10, type=float)
     env_args.add_argument('--newly_visited_reward_scale', default=1, type=float)
@@ -97,13 +123,13 @@ def main():
     assert args.algo in ['SAC', 'PPO'], 'Only SAC/PPO algorithms currently supported'
     print(args, flush=True)
 
-    # Create dict of argument groups
+    # 把所有参数按 agent / train / env 分类存起来
     arg_groups = {}
     for group in parser._action_groups:
         group_dict = {a.dest: getattr(args, a.dest, None) for a in group._group_actions}
         arg_groups[group.title] = argparse.Namespace(**group_dict)
 
-    # Create log directory and save parameters
+    # 保存参数在实验目录，如果你手动指定了 --logdir exp1，就存到 exp1/,否则自动建一个按时间命名的目录
     if args.logdir is not None:
         logdir = args.logdir
     else:
@@ -118,7 +144,7 @@ def main():
     with open(os.path.join(logdir, 'env_parameters.json'), 'w') as f:
         json.dump(arg_groups['env'].__dict__, f, indent=2)
 
-    # Construct policy kwargs in case of CNN architecture
+    # 当启用CNN时，构造 policy_kwargs：决定网络长什么样
     if args.cnn:
         if 'SAC' in args.algo:
             net_arch = dict(
@@ -130,7 +156,7 @@ def main():
                 vf=[args.cnn_dims, args.cnn_dims])]
         policy_kwargs = dict(
             net_arch=net_arch,
-            features_extractor_class=StackedMapFeaturesExtractor,
+            features_extractor_class=StackedMapFeaturesExtractor,# 输入先经过特征提取器
             features_extractor_kwargs=dict(
                 features_dim=args.cnn_dims,
                 map_size=args.input_size,
