@@ -144,34 +144,81 @@ def main():
     with open(os.path.join(logdir, 'env_parameters.json'), 'w') as f:
         json.dump(arg_groups['env'].__dict__, f, indent=2)
 
-    # 当启用CNN时，构造 policy_kwargs：决定网络长什么样
+    # 如果用户开启了 --cnn
     if args.cnn:
+
+        # 如果当前强化学习算法是 SAC
         if 'SAC' in args.algo:
+            # net_arch 是 stable-baselines3 里策略网络的结构配置
+            # pi = policy network（策略网络，负责输出动作）
+            # qf = Q-function network（Q价值网络，负责评估动作价值）
+            # [args.cnn_dims, args.cnn_dims] 表示各有两层全连接隐藏层，
+            # 每层神经元个数都是 args.cnn_dims，比如默认 256
             net_arch = dict(
                 pi=[args.cnn_dims, args.cnn_dims],
                 qf=[args.cnn_dims, args.cnn_dims])
+
+        # 如果当前算法是 PPO
         elif args.algo == 'PPO':
+            # PPO 的网络结构写法和 SAC 不一样
+            # pi = policy network（策略网络）
+            # vf = value function network（状态价值网络）
+            # 注意这里外面要包一层 list，这是 stable-baselines3 对 PPO 的接口要求
             net_arch = [dict(
                 pi=[args.cnn_dims, args.cnn_dims],
                 vf=[args.cnn_dims, args.cnn_dims])]
+
+        # policy_kwargs 是传给 stable-baselines3 的“策略配置字典”
+        # 它告诉算法：
+        # 1. 后面的策略/价值网络怎么搭
+        # 2. 输入先用哪个特征提取器处理
         policy_kwargs = dict(
+
+            # 指定策略网络/价值网络的隐藏层结构
             net_arch=net_arch,
-            features_extractor_class=StackedMapFeaturesExtractor,# 输入先经过特征提取器
+
+            # 指定“特征提取器”的类
+            # 也就是说：环境输出的原始 observation
+            # 不会直接喂给策略网络，而是先经过这个类做特征提取
+            features_extractor_class=StackedMapFeaturesExtractor,
+
+            # 这是传给上面这个特征提取器类的初始化参数
             features_extractor_kwargs=dict(
+
+                # 提取后的特征维度，最终会压成一个 features_dim 长度的向量
                 features_dim=args.cnn_dims,
+
+                # 每张地图的边长（输入分辨率）
                 map_size=args.input_size,
+
+                # 多尺度地图的数量
                 num_maps=args.num_maps,
+
+                # 激光雷达射线数量
                 lidar_rays=args.lidar_rays,
+
+                # 堆叠多少帧观测
                 stacks=args.stacks,
+
+                # 是否使用 grouped convolution（分组卷积）
+                # 这对应论文中的 scale-grouped CNN / SGCNN 思路
                 grouped_convs=args.grouped_convs,
+
+                # 是否把 frontier map（前沿地图）也作为输入
                 frontier_observation=args.frontier_observation))
+
+    # 如果没有开启 --cnn
     else:
+        # 那就不给算法额外的 CNN 配置
+        # 算法会退回到默认策略，一般就是 MLP 直接处理输入
         policy_kwargs = None
 
     # Train agent
+    # 创建环境
     env = MowerEnv(**vars(arg_groups['env']))
     env = Monitor(env, os.path.join(logdir, 'logs'), info_keywords=('level',))
     algo = getattr(importlib.import_module('stable_baselines3'), args.algo)
+    # 是否训练未训练完的模型
     if args.checkpoint is not None:
         # TODO: also load parameters.json from previous run
         model = algo.load(args.checkpoint, env=env)
@@ -184,6 +231,7 @@ def main():
         if 'SAC' in args.algo:
             kwargs['train_freq'] = args.train_freq
             kwargs['gradient_steps'] = args.gradient_steps
+        # 调用库函数创建模型对象
         model = algo("MultiInputPolicy", env, **kwargs)
     model.learn(total_timesteps=args.steps)
     model.save(os.path.join(logdir, 'agent'))

@@ -10,9 +10,19 @@ from gym import spaces
 from matplotlib import pyplot as plt
 from matplotlib import transforms as mtransforms
 from PIL import Image, ImageDraw, ImageFont
-
 from rlm import utils
 
+"""
+负责在代码里扮演“机器人所在的世界”。
+智能体每一步给它一个动作，它就负责：
+
+让机器人运动；
+判断会不会撞墙/撞障碍；
+模拟激光雷达；
+更新“已经覆盖了哪里、已知障碍在哪里、frontier 在哪里”这些地图；
+算奖励；
+返回下一步观测。
+"""
 class MowerEnv(gym.Env):
     """
     An environment where the goal is to cover as much of an area as possible.
@@ -292,6 +302,7 @@ class MowerEnv(gym.Env):
             action_obs_shape = (self.action_observations, self.action_space.shape[0])
             self.observation_space['action'] = spaces.Box(low=-1, high=+1, shape=action_obs_shape, dtype=np.float32)
 
+    # 重置，开始新的一局，返回初始 observation
     def reset(self):
         self.current_episode += 1
         self.elapsed_steps = 0
@@ -330,6 +341,7 @@ class MowerEnv(gym.Env):
         # Return observation
         return self._get_stacked_observation()
 
+    # 表示“执行一步动作”，核心函数
     def step(self, action):
         self.t0 = round(time.time() * 1000)
         dt_other = str(self.t0 - self.t1)
@@ -641,7 +653,7 @@ class MowerEnv(gym.Env):
                   'frontier:' + str(round(reward_frontier, 2)).rjust(5) + '),',
                   f'Time: {dt_step}/{dt_lidar}/{dt_other} ms step/lidar/etc')
         return obs, reward, done, info
-
+    # 可视化当前环境
     def render(self, mode):
         assert mode in ['full', 'limited', 'rgb_array']
 
@@ -780,7 +792,7 @@ class MowerEnv(gym.Env):
 
     def close(self):
         plt.close('all')
-
+    # 随机生成一个初始位置和朝向
     def _randomize_pose(self, mower_radius):
         """
         Randomizes a pose that is not in collision with obstacles or walls.
@@ -815,7 +827,7 @@ class MowerEnv(gym.Env):
         self._linvel = 0
         self._angvel = 0
         self._prev_action = [0] * self.action_space.shape[0]
-
+    # 把策略网络输出的动作，变成真实的线速度和角速度
     def _compute_velocities(self, action):
         """
         Computes the linear and angular velocities from the action
@@ -837,7 +849,7 @@ class MowerEnv(gym.Env):
         ang_vel = steering
         ang_vel *= self.max_ang_vel
         return lin_vel, ang_vel
-
+    # 根据速度和角速度，算下一时刻位姿。
     def _compute_new_pose(self, lin_vel, ang_vel, step_size, old_position_m, old_heading):
         """
         Computes a new pose based on desired linear and angular velocities
@@ -896,7 +908,7 @@ class MowerEnv(gym.Env):
             thickness=cv2.FILLED,
             lineType=self.line_type)
         return np.logical_and(local_position_map, local_all_obstacle_map).any()
-
+    # 将所有设立为未知
     def _set_all_unknown(self):
         """
         Set all obstacles as unknown and set coverage/obstacle pad values to 0.
@@ -907,7 +919,7 @@ class MowerEnv(gym.Env):
         self.known_obstacle_map = np.zeros_like(self.known_obstacle_map)
         self.coverage_pad_value = 0
         self.obstacle_pad_value = 0
-
+    # 初始化三张地图
     def _initialize_maps(self):
         """
         Initialize coverage/overlap/frontier maps
@@ -930,7 +942,7 @@ class MowerEnv(gym.Env):
             self.coverage_map[idxs] = 0
         self.overlap_map = self.coverage_map.copy()
         self.frontier_map = self._compute_frontier_map(self.coverage_map, self.known_obstacle_map)
-
+    # 初始化输入
     def _initialize_observation(self, lidar_obs):
         self.observation = {}
         self.observation['lidar'] = np.tile(lidar_obs, (self.stacks, 1))
@@ -944,7 +956,7 @@ class MowerEnv(gym.Env):
             self.observation['frontier'] = np.tile(self._get_multi_scale_map(self.frontier_map, pad_value=0, ceil=True), (self.stacks, 1, 1, 1))
         if self.action_observations > 0:
             self.observation['action'] = np.zeros(self.observation_space['action'].shape, dtype=np.float32)
-
+    # 初始化统计量
     def _initialize_metrics(self):
 
         # Map of all obstacles
@@ -1016,7 +1028,7 @@ class MowerEnv(gym.Env):
         # Initialize closest frontier distance
         self.frontier_distance = self._compute_closest_frontier_distance(
             self.observation['frontier'][0])
-
+    # 记录轨迹
     def _log_metrics(self, done, action=None, reward=None):
         if self.metrics_dir is None:
             return
@@ -1077,7 +1089,7 @@ class MowerEnv(gym.Env):
             img[self.unknown_obstacle_map > 0] = 0
             img = cv2.rotate(img, cv2.ROTATE_90_COUNTERCLOCKWISE)
             cv2.imwrite(os.path.join(self.metrics_dir, filename), img)
-
+    # 计算覆盖面积
     def _compute_coverage_diff(self, i1, i2, j1, j2):
         """
         Compute the region covered in the current step compared to the previous.
@@ -1190,7 +1202,7 @@ class MowerEnv(gym.Env):
         kernel = np.ones((3, 3), dtype=float)
         coverage_map = cv2.dilate(coverage_map, kernel, iterations=1)
         return np.logical_and(coverage_map, free_map).astype(float)
-    
+    # 由于多尺度 frontier 图，函数用来估计最近 frontier 距离
     def _compute_closest_frontier_distance(self, ms_frontier_map):
         """
         Approximates the distance to the nearest frontier point based on a
@@ -1212,7 +1224,7 @@ class MowerEnv(gym.Env):
         min_distance *= self.meters_per_pixel
         min_distance *= self.scale_factor ** (self.num_maps - 1)
         return min_distance
-
+    # 计算 lidar 点云
     def _compute_lidar_pts(self, position_m, heading):
         """
         Computes a lidar point cloud from a given pose.
@@ -1284,7 +1296,7 @@ class MowerEnv(gym.Env):
                 (lidar_pts_max, [[int(pos_p[0]), int(pos_p[1])]]), axis=0)
             angle += angle_diff
         return lidar_pts, pts_info, lidar_pts_max
-
+    # 把点云转成给神经网络的 lidar 观测向量。
     def _compute_lidar_observation(self, lidar_pts, position_m):
         """
         Computes normalized lidar distances from a given point cloud.
@@ -1330,7 +1342,7 @@ class MowerEnv(gym.Env):
         translation_matrix_2[0, 2] = self.input_size / 2
         translation_matrix_2[1, 2] = self.input_size / 2
         return translation_matrix_2 @ rotation_matrix @ translation_matrix_1
-
+    # 获得按某个尺度缩放的局部图
     def _get_relative_map(self, map, pad_value, scale=1, ceil=False, floor=False):
         assert not (ceil and floor), "_get_relative_map cannot do both ceil and floor"
         # note: since cv2.warAffine scales poorly with the input size, first
@@ -1415,7 +1427,7 @@ class MowerEnv(gym.Env):
             m = self.elapsed_steps % self.action_observations
             observation['action'] = np.concatenate((ob['action'][m:], ob['action'][:m]), axis=0)
         return observation
-
+    # 从 png 地图文件读入环境
     def _load_map(self, filename):
         img = cv2.imread(filename, flags=cv2.IMREAD_GRAYSCALE)
         img = np.fliplr(img.transpose(1, 0))
@@ -1428,7 +1440,7 @@ class MowerEnv(gym.Env):
         self.unknown_obstacle_map = np.zeros((self.size_p, self.size_p), dtype=float)
         self.known_obstacle_map[img == 0] = 1
         self.unknown_obstacle_map[img == 128] = 1
-
+    # 随机造房间结构
     def _randomize_floor_plan(self):
         min_room_size_p = int(10 * self.mower_radius * self.pixels_per_meter)
         max_room_size_p = int(32 * self.mower_radius * self.pixels_per_meter)
@@ -1542,7 +1554,7 @@ class MowerEnv(gym.Env):
             self.use_unknown_obstacles = self.max_unknown_obstacles > 0 and random.uniform(0, 1) < self.p_use_unknown_obstacles
             if self.use_known_obstacles or self.use_unknown_obstacles:
                 self._randomize_circular_obstacles()
-
+    # 课程学习 / 难度递进。
     def _set_level(self, level):
         """
         Sets the followng variables based on the specified level:

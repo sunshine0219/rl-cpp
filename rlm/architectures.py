@@ -4,12 +4,14 @@ from torch import nn
 
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 
-
+# 自己写的一个CNN作为类型提取器
+# 把 MowerEnv 输出的复杂观测（多尺度地图、lidar、可选历史动作）变成一个固定长度的特征向量
 class StackedMapFeaturesExtractor(BaseFeaturesExtractor):
+    # 初始化CNN
     def __init__(
             self,
             observation_space: gym.spaces.Dict,
-            features_dim,
+            features_dim, # 输出的特征向量长度
             map_size,
             num_maps,
             lidar_rays,
@@ -22,10 +24,11 @@ class StackedMapFeaturesExtractor(BaseFeaturesExtractor):
         if frontier_observation:
             num_map_observations = 3
 
-        in_channels = num_map_observations * stacks * num_maps
+        in_channels = num_map_observations * stacks * num_maps # 输入通道数
         out_channels = 2 * in_channels
-        out_size = (map_size // 2 - 2 - 2 - 2)**2 * out_channels
+        out_size = (map_size // 2 - 2 - 2 - 2)**2 * out_channels #卷积做完以后，展平前有多少个数（可深入）
 
+        # 是否进行分组卷积
         if grouped_convs:
             self.map_extractor = nn.Sequential(
                 nn.Conv2d(in_channels, out_channels, kernel_size=2, stride=2, padding=0, groups=num_maps),
@@ -55,12 +58,13 @@ class StackedMapFeaturesExtractor(BaseFeaturesExtractor):
                 nn.ReLU()
             )
 
+        # 用MLP将lidar从二维展平成一维
         self.lidar_extractor = nn.Sequential(
             nn.Flatten(),
             nn.Linear(stacks * lidar_rays, lidar_rays),
             nn.ReLU()
         )
-
+        # 如果有历史动作，直接展平作为额外特征
         if 'action' in observation_space.keys():
             self.action_extractor = nn.Sequential(
                 nn.Flatten()
@@ -69,17 +73,17 @@ class StackedMapFeaturesExtractor(BaseFeaturesExtractor):
             action_dim = action_obs_shape[0] * action_obs_shape[1]
         else:
             action_dim = 0
-
+        # 拼接向量并压缩
         self.fused_extractor = nn.Sequential(
             nn.Linear(features_dim + lidar_rays + action_dim, features_dim),
             nn.ReLU()
         )
-
+    # 向前传播
     def forward(self, observations) -> th.Tensor:
         use_frontier = 'frontier' in observations.keys()
         use_action = 'action' in observations.keys()
 
-        # Observations
+        # Observations提取数据
         lidar = observations['lidar']           # batch x stacks x lidar_rays
         coverage = observations['coverage']     # batch x stacks x nmaps x W x H
         obstacles = observations['obstacles']   # batch x stacks x nmaps x W x H
@@ -105,7 +109,7 @@ class StackedMapFeaturesExtractor(BaseFeaturesExtractor):
         if use_action:
             action_features = self.action_extractor(action) # batch x nactions*(1 or 2)
 
-        # Fused features
+        # Fused features：所有特征融合
         if use_action:
             features = th.cat([map_features, lidar_features, action_features], dim=1)
         else:
